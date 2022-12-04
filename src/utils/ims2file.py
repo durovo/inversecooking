@@ -38,7 +38,7 @@ def main(args):
         with parts[split].begin() as txn:
             present_entries = [key for key, _ in txn.cursor()]
         j = 0
-        for i, entry in tqdm(enumerate(datasets[split])):
+        for i, entry in tqdm(enumerate(datasets[split]), total=len(datasets[split])):
             impaths = entry['images'][0:5]
 
             for n, p in enumerate(impaths):

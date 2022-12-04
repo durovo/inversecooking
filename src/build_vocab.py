@@ -147,11 +147,30 @@ def update_counter(list_, counter_toks, istrain=False):
             counter_toks.update(tokens)
 
 
+def find_entities(instructions, entities):
+    tools_seen, actions_seen = set(), set()
+    tools_list, actions_list = [], []
+    for tool in entities['tools']:
+        for instruction in instructions:
+            if tool in instruction['text'].lower() and tool not in tools_seen:
+                tools_list.append(tool)
+                tools_seen.add(tool)
+
+    for action in entities['actions']:
+        for instruction in instructions:
+            if action in instruction['text'].lower():
+                actions_list.append(action)
+                actions_seen.add(action)
+
+    return tools_list, actions_list
+
+
 def build_vocab_recipe1m(args):
     print ("Loading data...")
     dets = json.load(open(os.path.join(args.recipe1m_path, 'det_ingrs.json'), 'r'))
     layer1 = json.load(open(os.path.join(args.recipe1m_path, 'layer1.json'), 'r'))
     layer2 = json.load(open(os.path.join(args.recipe1m_path, 'layer2.json'), 'r'))
+    entities = json.load(open(os.path.join(args.recipe1m_path, 'entities.json'), 'r'))
 
     id2im = {}
 
@@ -283,15 +302,35 @@ def build_vocab_recipe1m(args):
         idx += 1
     _ = vocab_ingrs.add_word('<pad>', idx)
 
+    # Tool vocab
+    vocab_tools = Vocabulary()
+    idx = vocab_tools.add_word('<end>')
+    for v in entities['tools']:
+        idx = vocab_tools.add_word(v, idx)
+        idx += 1
+    _ = vocab_tools.add_word('<pad>', idx)
+
+    # Action vocab
+    vocab_actions = Vocabulary()
+    idx = vocab_actions.add_word('<end>')
+    for v in entities['actions']:
+        idx = vocab_actions.add_word(v, idx)
+        idx += 1
+    _ = vocab_actions.add_word('<pad>', idx)
+
     print("Total ingr vocabulary size: {}".format(len(vocab_ingrs)))
     print("Total token vocabulary size: {}".format(len(vocab_toks)))
+    print("Total tool vocabulary size: {}".format(len(vocab_tools)))
+    print("Total action vocabulary size: {}".format(len(vocab_actions)))
 
     dataset = {'train': [], 'val': [], 'test': []}
 
     ######
     # 2. Tokenize and build dataset based on vocabularies.
     ######
-    for i, entry in tqdm(enumerate(layer1)):
+    tool_cnt = {k: 0 for k in entities['tools']}
+    action_cnt = {k: 0 for k in entities['actions']}
+    for i, entry in tqdm(enumerate(layer1), total=len(layer1)):
 
         # get all instructions for this recipe
         instrs = entry['instructions']
@@ -312,6 +351,12 @@ def build_vocab_recipe1m(args):
                 label_idx = vocab_ingrs(det_ingr_undrs)
                 if label_idx is not vocab_ingrs('<pad>') and label_idx not in labels:
                     labels.append(label_idx)
+
+        tool_list, action_list = find_entities(instrs, entities)
+        for tool in tool_list:
+            tool_cnt[tool] += 1
+        for action in action_list:
+            action_cnt[action] += 1
 
         # get raw text for instructions of this entry
         acc_len = 0
@@ -345,24 +390,33 @@ def build_vocab_recipe1m(args):
         title = nltk.tokenize.word_tokenize(entry['title'].lower())
 
         newentry = {'id': entry['id'], 'instructions': instrs_list, 'tokenized': toks,
-                    'ingredients': ingrs_list, 'images': images_list, 'title': title}
+                    'ingredients': ingrs_list, 'images': images_list, 'title': title,
+                    'tools': tool_list, 'actions': action_list}
         dataset[entry['partition']].append(newentry)
 
     print('Dataset size:')
     for split in dataset.keys():
         print(split, ':', len(dataset[split]))
 
-    return vocab_ingrs, vocab_toks, dataset
+    from pprint import pprint
+    pprint(sorted(tool_cnt.items(), key=lambda x: x[1], reverse=True))
+    pprint(sorted(action_cnt.items(), key=lambda x: x[1], reverse=True))
+
+    return vocab_ingrs, vocab_toks, vocab_tools, vocab_actions, dataset
 
 
 def main(args):
 
-    vocab_ingrs, vocab_toks, dataset = build_vocab_recipe1m(args)
+    vocab_ingrs, vocab_toks, vocab_tools, vocab_actions, dataset = build_vocab_recipe1m(args)
 
     with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_ingrs.pkl'), 'wb') as f:
         pickle.dump(vocab_ingrs, f)
     with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_toks.pkl'), 'wb') as f:
         pickle.dump(vocab_toks, f)
+    with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_tools.pkl'), 'wb') as f:
+        pickle.dump(vocab_tools, f)
+    with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_actios.pkl'), 'wb') as f:
+        pickle.dump(vocab_actions, f)
 
     for split in dataset.keys():
         with open(os.path.join(args.save_path, args.suff+'recipe1m_' + split + '.pkl'), 'wb') as f:

@@ -21,6 +21,8 @@ class Recipe1MDataset(data.Dataset):
 
         self.ingrs_vocab = pickle.load(open(os.path.join(aux_data_dir, suff + 'recipe1m_vocab_ingrs.pkl'), 'rb'))
         self.instrs_vocab = pickle.load(open(os.path.join(aux_data_dir, suff + 'recipe1m_vocab_toks.pkl'), 'rb'))
+        self.tools_vocab = pickle.load(open(os.path.join(aux_data_dir, suff + 'recipe1m_vocab_tools.pkl'), 'rb'))
+        self.actions_vocab = pickle.load(open(os.path.join(aux_data_dir, suff + 'recipe1m_vocab_actions.pkl'), 'rb'))
         self.dataset = pickle.load(open(os.path.join(aux_data_dir, suff + 'recipe1m_'+split+'.pkl'), 'rb'))
 
         self.label2word = self.get_ingrs_vocab()
@@ -61,6 +63,33 @@ class Recipe1MDataset(data.Dataset):
     def get_ingrs_vocab_size(self):
         return len(self.ingrs_vocab)
 
+    def get_tools_vocab_size(self):
+        return len(self.tools_vocab)
+
+    def get_actions_vocab_size(self):
+        return len(self.actions_vocab)
+
+    def _get_gt_tensor(self, labels, vocab):
+        labels_gt = np.ones(self.max_num_labels) * vocab('<pad>')
+        true_idxs = []
+        for i in range(len(labels)):
+            true_idxs.append(vocab(labels[i]))
+
+        pos = 0
+        for i in range(self.max_num_labels):
+            if i >= len(labels):
+                label = '<pad>'
+            else:
+                label = labels[i]
+            label_idx = vocab(label)
+            if label_idx not in labels_gt:
+                labels_gt[pos] = label_idx
+                pos += 1
+
+        labels_gt[pos] = vocab['<end>']
+
+        return torch.from_numpy(labels_gt).long()
+
     def __getitem__(self, index):
         """Returns one data pair (image and caption)."""
 
@@ -71,7 +100,9 @@ class Recipe1MDataset(data.Dataset):
 
         idx = index
 
-        labels = self.dataset[self.ids[idx]]['ingredients']
+        ingr_labels = self.dataset[self.ids[idx]]['ingredients']
+        tool_labels = self.dataset[self.ids[idx]]['tools']
+        action_labels = self.dataset[self.ids[idx]]['actions']
         title = sample['title']
 
         tokens = []
@@ -82,25 +113,37 @@ class Recipe1MDataset(data.Dataset):
             tokens.extend(c)
             tokens.append('<eoi>')
 
-        ilabels_gt = np.ones(self.max_num_labels) * self.ingrs_vocab('<pad>')
+
+        #############################################################################
+        ### BEING REPLACED
+        ingr_labels_gt = np.ones(self.max_num_labels) * self.ingrs_vocab('<pad>')
         pos = 0
 
+        # ingredient labels
         true_ingr_idxs = []
-        for i in range(len(labels)):
-            true_ingr_idxs.append(self.ingrs_vocab(labels[i]))
+        for i in range(len(ingr_labels)):
+            true_ingr_idxs.append(self.ingrs_vocab(ingr_labels[i]))
 
         for i in range(self.max_num_labels):
-            if i >= len(labels):
+            if i >= len(ingr_labels):
                 label = '<pad>'
             else:
-                label = labels[i]
+                label = ingr_labels[i]
             label_idx = self.ingrs_vocab(label)
-            if label_idx not in ilabels_gt:
-                ilabels_gt[pos] = label_idx
+            if label_idx not in ingr_labels_gt:
+                ingr_labels_gt[pos] = label_idx
                 pos += 1
 
-        ilabels_gt[pos] = self.ingrs_vocab('<end>')
-        ingrs_gt = torch.from_numpy(ilabels_gt).long()
+        ingr_labels_gt[pos] = self.ingrs_vocab('<end>')
+        ingrs_gt_old = torch.from_numpy(ingr_labels_gt).long()
+        ### BEING REPLACED
+        #############################################################################
+
+        # tool labels
+        # TODO: compare ingrs_gt with ingrs_gt_old. they should be identical
+        ingrs_gt = self._get_gt_tensor(ingr_labels, self.ingrs_vocab)
+        tools_gt = self._get_gt_tensor(tool_labels, self.tools_vocab)
+        actions_gt = self._get_gt_tensor(action_labels, self.actions_vocab)
 
         if len(paths) == 0:
             path = None
@@ -137,7 +180,7 @@ class Recipe1MDataset(data.Dataset):
         caption = caption[0:self.maxseqlen]
         target = torch.Tensor(caption)
 
-        return image_input, target, ingrs_gt, img_id, path, self.instrs_vocab('<pad>')
+        return image_input, target, ingrs_gt, tools_gt, actions_gt, img_id, path, self.instrs_vocab('<pad>')
 
     def __len__(self):
         return len(self.ids)
@@ -154,12 +197,14 @@ def collate_fn(data):
 
     # Sort a data list by caption length (descending order).
     # data.sort(key=lambda x: len(x[2]), reverse=True)
-    image_input, captions, ingrs_gt, img_id, path, pad_value = zip(*data)
+    image_input, captions, ingrs_gt, tools_gt, actions_gt, img_id, path, pad_value = zip(*data)
 
     # Merge images (from tuple of 3D tensor to 4D tensor).
 
     image_input = torch.stack(image_input, 0)
     ingrs_gt = torch.stack(ingrs_gt, 0)
+    tools_gt = torch.stack(tools_gt, 0)
+    actions_gt = torch.stack(actions_gt, 0)
 
     # Merge captions (from tuple of 1D tensor to 2D tensor).
     lengths = [len(cap) for cap in captions]
@@ -169,7 +214,7 @@ def collate_fn(data):
         end = lengths[i]
         targets[i, :end] = cap[:end]
 
-    return image_input, targets, ingrs_gt, img_id, path
+    return image_input, targets, ingrs_gt, tools_gt, actions_gt, img_id, path
 
 
 def get_loader(data_dir, aux_data_dir, split, maxseqlen,
