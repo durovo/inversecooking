@@ -145,6 +145,9 @@ class Recipe1MDataset(data.Dataset):
         tools_gt = self._get_gt_tensor(tool_labels, self.tools_vocab)
         actions_gt = self._get_gt_tensor(action_labels, self.actions_vocab)
 
+        assert ingrs_gt == ingrs_gt_old
+        exit()
+
         if len(paths) == 0:
             path = None
             image_input = torch.zeros((3, 224, 224))

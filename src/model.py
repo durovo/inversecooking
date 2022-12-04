@@ -46,11 +46,16 @@ def mask_from_eos(ids, eos_value, mult_before=True):
     return mask
 
 
-def get_model(args, ingr_vocab_size, instrs_vocab_size):
+def get_model(args, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size):
 
-    # build ingredients embedding
+    # build ingredients, tools, actions embedding
     encoder_ingrs = EncoderLabels(args.embed_size, ingr_vocab_size,
                                   args.dropout_encoder, scale_grad=False).to(device)
+    encoder_tools = EncoderLabels(args.embed_size, tool_vocab_size,
+                                  args.dropout_encoder, scale_grad=False).to(device)
+    encoder_actions = EncoderLabels(args.embed_size, action_vocab_size,
+                                    args.dropout_encoder, scale_grad=False).to(device)
+
     # build image model
     encoder_image = EncoderCNN(args.embed_size, args.dropout_encoder, args.image_model)
 
@@ -73,43 +78,162 @@ def get_model(args, ingr_vocab_size, instrs_vocab_size):
                                       normalize_inputs=True,
                                       last_ln=True,
                                       scale_embed_grad=False)
+
+    tool_decoder = DecoderTransformer(args.embed_size, tool_vocab_size, dropout=args.dropout_decoder_i,
+                                      seq_length=args.maxnumlabels,
+                                      num_instrs=1, attention_nheads=args.n_att_ingrs,
+                                      pos_embeddings=False,
+                                      num_layers=args.transf_layers_ingrs,
+                                      learned=False,
+                                      normalize_before=True,
+                                      normalize_inputs=True,
+                                      last_ln=True,
+                                      scale_embed_grad=False)
+
+    action_decoder = DecoderTransformer(args.embed_size, action_vocab_size, dropout=args.dropout_decoder_i,
+                                        seq_length=args.maxnumlabels,
+                                        num_instrs=1, attention_nheads=args.n_att_ingrs,
+                                        pos_embeddings=False,
+                                        num_layers=args.transf_layers_ingrs,
+                                        learned=False,
+                                        normalize_before=True,
+                                        normalize_inputs=True,
+                                        last_ln=True,
+                                        scale_embed_grad=False)
+
     # recipe loss
     criterion = MaskedCrossEntropyCriterion(ignore_index=[instrs_vocab_size-1], reduce=False)
 
-    # ingredients loss
-    label_loss = nn.BCELoss(reduce=False)
-    eos_loss = nn.BCELoss(reduce=False)
+    # entity loss
+    label_loss_ingr = nn.BCELoss(reduce=False)
+    eos_loss_ingr = nn.BCELoss(reduce=False)
 
-    model = InverseCookingModel(encoder_ingrs, decoder, ingr_decoder, encoder_image,
-                                crit=criterion, crit_ingr=label_loss, crit_eos=eos_loss,
-                                pad_value=ingr_vocab_size-1,
-                                ingrs_only=args.ingrs_only, recipe_only=args.recipe_only,
-                                label_smoothing=args.label_smoothing_ingr)
+    label_loss_tool = nn.BCELoss(reduce=False)
+    eos_loss_tool = nn.BCELoss(reduce=False)
+
+    label_loss_action = nn.BCELoss(reduce=False)
+    eos_loss_action = nn.BCELoss(reduce=False)
+
+    model = InverseCookingModel(encoder_ingrs, encoder_tools, encoder_actions,
+                                decoder, encoder_image,
+                                ingr_decoder, tool_decoder, action_decoder,
+                                crit=criterion,
+                                crit_ingr=label_loss_ingr, crit_tool=label_loss_tool, crit_action=label_loss_action,
+                                crit_eos_ingr=eos_loss_ingr, crit_eos_tool=eos_loss_tool, crit_eos_action=eos_loss_action,
+                                pad_value=ingr_vocab_size-1, ingrs_only=args.ingrs_only,
+                                recipe_only=args.recipe_only, label_smoothing=args.label_smoothing_ingr)
 
     return model
 
 
 class InverseCookingModel(nn.Module):
-    def __init__(self, ingredient_encoder, recipe_decoder, ingr_decoder, image_encoder,
-                 crit=None, crit_ingr=None, crit_eos=None,
+    def __init__(self, ingredient_encoder, tool_encoder, action_encoder,
+                 recipe_decoder, image_encoder,
+                 ingr_decoder, tool_decoder, action_decoder,
+                 crit=None,
+                 crit_ingr=None, crit_tool=None, crit_action=None,
+                 crit_eos_ingr=None, crit_eos_tool=None, crit_eos_action=None,
                  pad_value=0, ingrs_only=True,
                  recipe_only=False, label_smoothing=0.0):
 
         super(InverseCookingModel, self).__init__()
 
+        # entity encoders
         self.ingredient_encoder = ingredient_encoder
+        self.tool_encoder = tool_encoder
+        self.action_encoder = action_encoder
+
         self.recipe_decoder = recipe_decoder
         self.image_encoder = image_encoder
+
+        # entity decoders
         self.ingredient_decoder = ingr_decoder
+        self.tool_decoder = tool_decoder
+        self.action_decoder = action_decoder
+
         self.crit = crit
+
+        # entity criteria
         self.crit_ingr = crit_ingr
+        self.crit_tool = crit_tool
+        self.crit_action = crit_action
+
         self.pad_value = pad_value
         self.ingrs_only = ingrs_only
         self.recipe_only = recipe_only
-        self.crit_eos = crit_eos
+
+        # entity eos criteria
+        self.crit_eos_ingr = crit_eos_ingr
+        self.crit_eos_tool = crit_eos_tool
+        self.crit_eos_action = crit_eos_action
+
         self.label_smoothing = label_smoothing
 
-    def forward(self, img_inputs, captions, target_ingrs,
+    def _entity_forward(self, entity_name, losses, img_features, entity_decoder, target_entities, crit_entity, crit_entity_eos):
+        target_one_hot = label2onehot(target_entities, self.pad_value)
+        target_one_hot_smooth = label2onehot(target_entities, self.pad_value)
+
+        target_one_hot_smooth[target_one_hot_smooth == 1] = (1-self.label_smoothing)
+        target_one_hot_smooth[target_one_hot_smooth == 0] = self.label_smoothing / target_one_hot_smooth.size(-1)
+
+        # decode entities with transformer
+        # autoregressive mode for entity decoder
+        entity_ids, entity_logits = entity_decoder.sample(None, None, greedy=True,
+                                                        temperature=1.0, img_features=img_features,
+                                                        first_token_value=0, replacement=False)
+
+        entity_logits = torch.nn.functional.softmax(entity_logits, dim=-1)
+
+        # find idxs for eos entity
+        # eos probability is the one assigned to the first position of the softmax
+        eos = entity_logits[:, :, 0]
+        target_eos = ((target_entities == 0) ^ (target_entities == self.pad_value))
+
+        eos_pos = (target_entities == 0)
+        eos_head = ((target_entities != self.pad_value) & (target_entities != 0))
+
+        # select transformer steps to pool from
+        mask_perminv = mask_from_eos(target_entities, eos_value=0, mult_before=False)
+        entity_probs = entity_logits * mask_perminv.float().unsqueeze(-1)
+
+        entity_probs, _ = torch.max(entity_probs, dim=1)
+
+        # ignore predicted entity after eos in ground truth
+        entity_ids[mask_perminv == 0] = self.pad_value
+
+        entity_loss = crit_entity(entity_probs, target_one_hot_smooth)
+        entity_loss = torch.mean(entity_loss, dim=-1)
+
+        losses[f'{entity_name}_loss'] = entity_loss
+
+        # cardinality penalty
+        losses[f'{entity_name}_card_penalty'] = torch.abs((entity_probs*target_one_hot).sum(1) - target_one_hot.sum(1)) + \
+                                    torch.abs((entity_probs*(1-target_one_hot)).sum(1))
+
+        eos_loss = crit_entity_eos(eos, target_eos.float())
+
+        mult = 1/2
+        # eos loss is only computed for timesteps <= t_eos and equally penalizes 0s and 1s
+        losses[f'{entity_name}_eos_loss'] = mult*(eos_loss * eos_pos.float()).sum(1) / (eos_pos.float().sum(1) + 1e-6) + \
+                                mult*(eos_loss * eos_head.float()).sum(1) / (eos_head.float().sum(1) + 1e-6)
+        # iou
+        pred_one_hot = label2onehot(entity_ids, self.pad_value)
+        # iou sample during training is computed using the true eos position
+        losses[f'{entity_name}_iou'] = softIoU(pred_one_hot, target_one_hot)
+
+        return losses
+
+    def _encode_entities(self, entity_encoder, target_entities):
+        # encode gt entities
+        target_entity_feats = entity_encoder(target_entities)
+
+        target_entity_mask = mask_from_eos(target_entities, eos_value=0, mult_before=False)
+        target_entity_mask = target_entity_mask.float().unsqueeze(1)
+
+        return target_entity_feats, target_entity_mask
+
+    def forward(self, img_inputs, captions,
+                target_ingrs, target_tools, target_actions,
                 sample=False, keep_cnn_gradients=False):
 
         if sample:
@@ -121,6 +245,8 @@ class InverseCookingModel(nn.Module):
         img_features = self.image_encoder(img_inputs, keep_cnn_gradients)
 
         losses = {}
+
+        ### TODO: REPLACE ######## 
         target_one_hot = label2onehot(target_ingrs, self.pad_value)
         target_one_hot_smooth = label2onehot(target_ingrs, self.pad_value)
 
@@ -173,17 +299,35 @@ class InverseCookingModel(nn.Module):
             pred_one_hot = label2onehot(ingr_ids, self.pad_value)
             # iou sample during training is computed using the true eos position
             losses['iou'] = softIoU(pred_one_hot, target_one_hot)
+        ### END: REPLACE ########
+
+        losses = self._entity_forward('ingredients', losses, img_features, self.ingredient_decoder,
+                                      target_ingrs, self.crit_ingr, self.crit_eos_ingr)
+        losses = self._entity_forward('tools', losses, img_features, self.tool_decoder,
+                                      target_tools, self.crit_tool, self.crit_eos_tool)
+        losses = self._entity_forward('actions', losses, img_features, self.action_decoder,
+                                      target_actions, self.crit_action, self.crit_eos_action)
 
         if self.ingrs_only:
             return losses
 
         # encode ingredients
+
+        # TODO: REPLACE ###########
         target_ingr_feats = self.ingredient_encoder(target_ingrs)
         target_ingr_mask = mask_from_eos(target_ingrs, eos_value=0, mult_before=False)
 
         target_ingr_mask = target_ingr_mask.float().unsqueeze(1)
+        ###### END REPLACE ########
 
-        outputs, ids = self.recipe_decoder(target_ingr_feats, target_ingr_mask, captions, img_features)
+        target_ingr_feats, target_ingr_mask = self._encode_entities(self.ingredient_encoder, target_ingrs)
+        target_tool_feats, target_tool_mask = self._encode_entities(self.tool_encoder, target_tools)
+        target_action_feats, target_action_mask = self._encode_entities(self.action_encoder, target_actions)
+
+        outputs, ids = self.recipe_decoder(target_ingr_feats, target_ingr_mask, 
+                                           target_tool_feats, target_tool_mask,
+                                           target_action_feats, target_action_mask,
+                                           captions, img_features)
 
         outputs = outputs[:, :-1, :].contiguous()
         outputs = outputs.view(outputs.size(0) * outputs.size(1), -1)
