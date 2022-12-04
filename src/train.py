@@ -134,8 +134,8 @@ def main(args):
                                                           suff=args.suff)
 
     ingr_vocab_size = datasets[split].get_ingrs_vocab_size()
-    tool_vocab_size = datasets[split].get_tool_vocab_size()
-    action_vocab_size = datasets[split].get_action_vocab_size()
+    tool_vocab_size = datasets[split].get_tools_vocab_size()
+    action_vocab_size = datasets[split].get_actions_vocab_size()
     instrs_vocab_size = datasets[split].get_instrs_vocab_size()
 
     # Build the model

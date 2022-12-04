@@ -415,7 +415,7 @@ def main(args):
         pickle.dump(vocab_toks, f)
     with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_tools.pkl'), 'wb') as f:
         pickle.dump(vocab_tools, f)
-    with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_actios.pkl'), 'wb') as f:
+    with open(os.path.join(args.save_path, args.suff+'recipe1m_vocab_actions.pkl'), 'wb') as f:
         pickle.dump(vocab_actions, f)
 
     for split in dataset.keys():
