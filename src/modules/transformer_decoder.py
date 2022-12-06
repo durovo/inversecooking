@@ -160,7 +160,7 @@ class TransformerDecoderLayer(nn.Module):
         if self.use_last_ln:
             self.last_ln = LayerNorm(self.embed_dim)
 
-    def forward(self, x, ingr_features, ingr_mask, incremental_state, img_features):
+    def forward(self, x, entity_features, entity_mask, incremental_state, img_features):
 
         # self attention
         residual = x
@@ -181,7 +181,7 @@ class TransformerDecoderLayer(nn.Module):
         x = self.maybe_layer_norm(1, x, before=True)
 
         # attention
-        if ingr_features is None:
+        if entity_features is None:
 
             x, _ = self.cond_att(query=x,
                                     key=img_features,
@@ -192,9 +192,9 @@ class TransformerDecoderLayer(nn.Module):
                                     )
         elif img_features is None:
             x, _ = self.cond_att(query=x,
-                                    key=ingr_features,
-                                    value=ingr_features,
-                                    key_padding_mask=ingr_mask,
+                                    key=entity_features,
+                                    value=entity_features,
+                                    key_padding_mask=entity_mask,
                                     incremental_state=incremental_state,
                                     static_kv=True,
                                     )
@@ -202,9 +202,9 @@ class TransformerDecoderLayer(nn.Module):
 
         else:
             # attention on concatenation of encoder_out and encoder_aux, query self attn (x)
-            kv = torch.cat((img_features, ingr_features), 0)
+            kv = torch.cat((img_features, entity_features), 0)
             mask = torch.cat((torch.zeros(img_features.shape[1], img_features.shape[0], dtype=torch.uint8).to(device),
-                              ingr_mask), 1)
+                              entity_mask), 1).bool()
             x, _ = self.cond_att(query=x,
                                     key=kv,
                                     value=kv,
@@ -267,13 +267,13 @@ class DecoderTransformer(nn.Module):
 
         self.linear = Linear(embed_size, vocab_size-1)
 
-    def forward(self, ingr_features, ingr_mask, captions, img_features, incremental_state=None):
+    def forward(self, entity_features, entity_mask, captions, img_features, incremental_state=None):
 
-        if ingr_features is not None:
-            ingr_features = ingr_features.permute(0, 2, 1)
-            ingr_features = ingr_features.transpose(0, 1)
+        if entity_features is not None:
+            entity_features = entity_features.permute(0, 2, 1)
+            entity_features = entity_features.transpose(0, 1)
             if self.normalize_inputs:
-                self.layer_norms_in[0](ingr_features)
+                self.layer_norms_in[0](entity_features)
 
         if img_features is not None:
             img_features = img_features.permute(0, 2, 1)
@@ -281,8 +281,8 @@ class DecoderTransformer(nn.Module):
             if self.normalize_inputs:
                 self.layer_norms_in[1](img_features)
 
-        if ingr_mask is not None:
-            ingr_mask = (1-ingr_mask.squeeze(1)).byte()
+        if entity_mask is not None:
+            entity_mask = (1-entity_mask.squeeze(1)).byte()
 
         # embed positions
         if self.embed_positions is not None:
@@ -309,8 +309,8 @@ class DecoderTransformer(nn.Module):
         for p, layer in enumerate(self.layers):
             x  = layer(
                 x,
-                ingr_features,
-                ingr_mask,
+                entity_features,
+                entity_mask,
                 incremental_state,
                 img_features
             )
@@ -323,21 +323,21 @@ class DecoderTransformer(nn.Module):
 
         return x, predicted
 
-    def sample(self, ingr_features, ingr_mask, greedy=True, temperature=1.0, beam=-1,
+    def sample(self, entity_features, entity_mask, greedy=True, temperature=1.0, beam=-1,
                img_features=None, first_token_value=0,
                replacement=True, last_token_value=0):
 
         incremental_state = {}
 
         # create dummy previous word
-        if ingr_features is not None:
-            fs = ingr_features.size(0)
+        if entity_features is not None:
+            fs = entity_features.size(0)
         else:
             fs = img_features.size(0)
 
         if beam != -1:
             if fs == 1:
-                return self.sample_beam(ingr_features, ingr_mask, beam, img_features, first_token_value,
+                return self.sample_beam(entity_features, entity_mask, beam, img_features, first_token_value,
                                         replacement, last_token_value)
             else:
                 print ("Beam Search can only be used with batch size of 1. Running greedy or temperature sampling...")
@@ -350,7 +350,7 @@ class DecoderTransformer(nn.Module):
 
         for i in range(self.seq_length):
             # forward
-            outputs, _ = self.forward(ingr_features, ingr_mask, torch.stack(sampled_ids, 1),
+            outputs, _ = self.forward(entity_features, entity_mask, torch.stack(sampled_ids, 1),
                                       img_features, incremental_state)
             outputs = outputs.squeeze(1)
             if not replacement:
@@ -388,13 +388,13 @@ class DecoderTransformer(nn.Module):
 
         return sampled_ids, logits
 
-    def sample_beam(self, ingr_features, ingr_mask, beam=3, img_features=None, first_token_value=0,
+    def sample_beam(self, entity_features, entity_mask, beam=3, img_features=None, first_token_value=0,
                    replacement=True, last_token_value=0):
         k = beam
         alpha = 0.0
         # create dummy previous word
-        if ingr_features is not None:
-            fs = ingr_features.size(0)
+        if entity_features is not None:
+            fs = entity_features.size(0)
         else:
             fs = img_features.size(0)
         first_word = torch.ones(fs)*first_token_value
@@ -409,7 +409,7 @@ class DecoderTransformer(nn.Module):
             all_candidates = []
             for rem in range(len(sequences)):
                 incremental = sequences[rem][2]
-                outputs, _ = self.forward(ingr_features, ingr_mask, torch.stack(sequences[rem][0], 1),
+                outputs, _ = self.forward(entity_features, entity_mask, torch.stack(sequences[rem][0], 1),
                                           img_features, incremental)
                 outputs = outputs.squeeze(1)
                 if not replacement:
