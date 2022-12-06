@@ -24,16 +24,18 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 map_loc = None if torch.cuda.is_available() else 'cpu'
 
 
-def merge_models(args, model, ingr_vocab_size, instrs_vocab_size):
+def merge_models(args, model, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size):
     load_args = pickle.load(open(os.path.join(args.save_dir, args.project_name,
                                               args.transfer_from, 'checkpoints/args.pkl'), 'rb'))
 
-    model_ingrs = get_model(load_args, ingr_vocab_size, instrs_vocab_size)
+    model_ingrs = get_model(load_args, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size)
     model_path = os.path.join(args.save_dir, args.project_name, args.transfer_from, 'checkpoints', 'modelbest.ckpt')
 
     # Load the trained model parameters
     model_ingrs.load_state_dict(torch.load(model_path, map_location=map_loc))
     model.ingredient_decoder = model_ingrs.ingredient_decoder
+    model.tool_decoder = model_ingrs.tool_decoder
+    model.action_decoder = model_ingrs.action_decoder
     args.transf_layers_ingrs = load_args.transf_layers_ingrs
     args.n_att_ingrs = load_args.n_att_ingrs
 
@@ -146,12 +148,18 @@ def main(args):
 
     # add model parameters
     if args.ingrs_only:
-        params = list(model.ingredient_decoder.parameters())
+        # only entity decoders
+        params = list(model.ingredient_decoder.parameters()) + list(model.tool_decoder.parameters()) \
+                 + list(model.action_decoder.parameters())
     elif args.recipe_only:
-        params = list(model.recipe_decoder.parameters()) + list(model.ingredient_encoder.parameters())
+        # recipe decoder + entity encoders
+        params = list(model.recipe_decoder.parameters()) + list(model.ingredient_encoder.parameters()) \
+                 + list(model.tool_encoder.parameters()) + list(model.action_encoder.parameters())
     else:
-        params = list(model.recipe_decoder.parameters()) + list(model.ingredient_decoder.parameters()) \
-                 + list(model.ingredient_encoder.parameters())
+        params = list(model.recipe_decoder.parameters()) \
+                 + list(model.ingredient_decoder.parameters()) + list(model.ingredient_encoder.parameters()) \
+                 + list(model.tool_decoder.parameters()) + list(model.tool_encoder.parameters()) \
+                 + list(model.action_decoder.parameters()) + list(model.action_encoder.parameters())
 
     # only train the linear layer in the encoder if we are not transfering from another model
     if args.transfer_from == '':
@@ -186,7 +194,7 @@ def main(args):
         pretrained_dict = torch.load(model_path, map_location=map_loc)
         pretrained_dict = {k: v for k, v in pretrained_dict.items() if 'encoder' in k}
         model.load_state_dict(pretrained_dict, strict=False)
-        args, model = merge_models(args, model, ingr_vocab_size, instrs_vocab_size)
+        args, model = merge_models(args, model, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size)
 
     if device != 'cpu' and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
@@ -235,23 +243,30 @@ def main(args):
             total_step = len(data_loaders[split])
             loader = iter(data_loaders[split])
 
-            total_loss_dict = {'recipe_loss': [], 'ingr_loss': [],
+            total_loss_dict = {'recipe_loss': [], 'entity_loss': [],
                                'eos_loss': [], 'loss': [],
                                'iou': [], 'perplexity': [], 'iou_sample': [],
+                               'ingredient_iou_sample': [], 'tool_iou_sample': [], 'action_iou_sample': [],
                                'f1': [],
                                'card_penalty': []}
 
-            error_types = {'tp_i': 0, 'fp_i': 0, 'fn_i': 0, 'tn_i': 0,
-                           'tp_all': 0, 'fp_all': 0, 'fn_all': 0}
+            error_types = {'tp_ingredient': 0, 'fp_ingredient': 0, 'fn_ingredient': 0, 'tn_ingredient': 0,
+                           'tp_tool': 0, 'fp_tool': 0, 'fn_tool': 0, 'tn_tool': 0,
+                           'tp_action': 0, 'fp_action': 0, 'fn_action': 0, 'tn_action': 0,
+                           'tp_all': 0, 'fp_all': 0, 'fn_all': 0, 'tn_all': 0}
 
             torch.cuda.synchronize()
             start = time.time()
 
-            for i in range(total_step):
+            from tqdm import tqdm
+            for i in tqdm(range(total_step)):
 
-                img_inputs, captions, ingr_gt, img_ids, paths = loader.next()
+                img_inputs, captions, ingr_gt, tool_gt, action_gt, img_ids, paths = loader.next()
 
                 ingr_gt = ingr_gt.to(device)
+                tool_gt = tool_gt.to(device)
+                action_gt = action_gt.to(device)
+
                 img_inputs = img_inputs.to(device)
                 captions = captions.to(device)
                 true_caps_batch = captions.clone()[:, 1:].contiguous()
@@ -259,27 +274,40 @@ def main(args):
 
                 if split == 'val':
                     with torch.no_grad():
-                        losses = model(img_inputs, captions, ingr_gt)
+                        losses = model(img_inputs, captions, ingr_gt, tool_gt, action_gt)
 
                         if not args.recipe_only:
-                            outputs = model(img_inputs, captions, ingr_gt, sample=True)
+                            outputs = model(img_inputs, captions, ingr_gt, tool_gt, action_gt, sample=True)
+                            iou_samples = []
+                            for entity_type in ['ingredient', 'tool', 'action']:
+                                entity_vocab_size = {'ingredient': ingr_vocab_size,
+                                                     'tool': tool_vocab_size,
+                                                     'action': action_vocab_size}[entity_type]
+                                entity_gt = {'ingredient': ingr_gt,
+                                             'tool': tool_gt,
+                                             'action': action_gt}[entity_type]
+                                
+                                entity_ids_greedy = outputs[f'{entity_type}_ids']
+                                entity_mask = mask_from_eos(entity_ids_greedy, eos_value=0, mult_before=False)
+                                entity_ids_greedy[entity_mask == 0] = entity_vocab_size-1
 
-                            ingr_ids_greedy = outputs['ingr_ids']
+                                pred_one_hot = label2onehot(entity_ids_greedy, entity_vocab_size-1)
+                                target_one_hot = label2onehot(entity_gt, entity_vocab_size-1)
 
-                            mask = mask_from_eos(ingr_ids_greedy, eos_value=0, mult_before=False)
-                            ingr_ids_greedy[mask == 0] = ingr_vocab_size-1
-                            pred_one_hot = label2onehot(ingr_ids_greedy, ingr_vocab_size-1)
-                            target_one_hot = label2onehot(ingr_gt, ingr_vocab_size-1)
-                            iou_sample = softIoU(pred_one_hot, target_one_hot)
-                            iou_sample = iou_sample.sum() / (torch.nonzero(iou_sample.data).size(0) + 1e-6)
-                            loss_dict['iou_sample'] = iou_sample.item()
+                                iou_sample = softIoU(pred_one_hot, target_one_hot)
+                                iou_sample = iou_sample.sum() / (torch.nonzero(iou_sample.data).size(0) + 1e-6)
+                                iou_samples.append(iou_sample)
+                                loss_dict[f'{entity_type}_iou_sample'] = iou_sample.item()
 
-                            update_error_types(error_types, pred_one_hot, target_one_hot)
+                                update_error_types(error_types, pred_one_hot, target_one_hot, entity_type)
+
+                            loss_dict['iou_sample'] = torch.mean(torch.stack(iou_samples)).item()
 
                             del outputs, pred_one_hot, target_one_hot, iou_sample
 
                 else:
-                    losses = model(img_inputs, captions, ingr_gt,
+                    losses = model(img_inputs, captions,
+                                   ingr_gt, tool_gt, action_gt,
                                    keep_cnn_gradients=keep_cnn_gradients)
 
                 if not args.ingrs_only:
@@ -301,9 +329,9 @@ def main(args):
 
                 if not args.recipe_only:
 
-                    ingr_loss = losses['ingr_loss']
-                    ingr_loss = ingr_loss.mean()
-                    loss_dict['ingr_loss'] = ingr_loss.item()
+                    entity_loss = losses['entity_loss']
+                    entity_loss = entity_loss.mean()
+                    loss_dict['entity_loss'] = entity_loss.item()
 
                     eos_loss = losses['eos_loss']
                     eos_loss = eos_loss.mean()
@@ -316,9 +344,9 @@ def main(args):
                     card_penalty = losses['card_penalty'].mean()
                     loss_dict['card_penalty'] = card_penalty.item()
                 else:
-                    ingr_loss, eos_loss, card_penalty = 0, 0, 0
+                    entity_loss, eos_loss, card_penalty = 0, 0, 0
 
-                loss = args.loss_weight[0] * recipe_loss + args.loss_weight[1] * ingr_loss \
+                loss = args.loss_weight[0] * recipe_loss + args.loss_weight[1] * entity_loss \
                        + args.loss_weight[2]*eos_loss + args.loss_weight[3]*card_penalty
 
                 loss_dict['loss'] = loss.item()
@@ -358,9 +386,10 @@ def main(args):
                 del loss, losses, captions, img_inputs
 
             if split == 'val' and not args.recipe_only:
-                ret_metrics = {'accuracy': [], 'f1': [], 'jaccard': [], 'f1_ingredients': [], 'dice': []}
+                ret_metrics = {'accuracy': [], 'f1': [], 'jaccard': [], 'dice': [],
+                               'f1_ingredient': [], 'f1_tool': [], 'f1_action': []}
                 compute_metrics(ret_metrics, error_types,
-                                ['accuracy', 'f1', 'jaccard', 'f1_ingredients', 'dice'], eps=1e-10,
+                                ['accuracy', 'f1', 'jaccard', 'f1_ingredient', 'f1_tool', 'f1_action', 'dice'], eps=1e-10,
                                 weights=None)
 
                 total_loss_dict['f1'] = ret_metrics['f1']

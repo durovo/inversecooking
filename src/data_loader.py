@@ -88,7 +88,7 @@ class Recipe1MDataset(data.Dataset):
                 labels_gt[pos] = label_idx
                 pos += 1
 
-        labels_gt[pos] = vocab['<end>']
+        labels_gt[pos] = vocab('<end>')
 
         return torch.from_numpy(labels_gt).long()
 
@@ -115,40 +115,11 @@ class Recipe1MDataset(data.Dataset):
             tokens.extend(c)
             tokens.append('<eoi>')
 
-
-        #############################################################################
-        ### BEING REPLACED
-        ingr_labels_gt = np.ones(self.max_num_labels) * self.ingrs_vocab('<pad>')
-        pos = 0
-
-        # ingredient labels
-        true_ingr_idxs = []
-        for i in range(len(ingr_labels)):
-            true_ingr_idxs.append(self.ingrs_vocab(ingr_labels[i]))
-
-        for i in range(self.max_num_labels):
-            if i >= len(ingr_labels):
-                label = '<pad>'
-            else:
-                label = ingr_labels[i]
-            label_idx = self.ingrs_vocab(label)
-            if label_idx not in ingr_labels_gt:
-                ingr_labels_gt[pos] = label_idx
-                pos += 1
-
-        ingr_labels_gt[pos] = self.ingrs_vocab('<end>')
-        ingrs_gt_old = torch.from_numpy(ingr_labels_gt).long()
-        ### BEING REPLACED
-        #############################################################################
-
         # tool labels
-        # TODO: compare ingrs_gt with ingrs_gt_old. they should be identical
         ingrs_gt = self._get_gt_tensor(ingr_labels, self.ingrs_vocab)
         tools_gt = self._get_gt_tensor(tool_labels, self.tools_vocab)
         actions_gt = self._get_gt_tensor(action_labels, self.actions_vocab)
 
-        assert ingrs_gt == ingrs_gt_old
-        exit()
 
         if len(paths) == 0:
             path = None
