@@ -86,12 +86,15 @@ def main(args):
                                       use_lmdb=args.use_lmdb, suff=args.suff)
 
     ingr_vocab_size = dataset.get_ingrs_vocab_size()
+    tool_vocab_size = datasets[split].get_tools_vocab_size()
+    action_vocab_size = datasets[split].get_actions_vocab_size()
     instrs_vocab_size = dataset.get_instrs_vocab_size()
+    
 
     args.numgens = 1
 
     # Build the model
-    model = get_model(args, ingr_vocab_size, instrs_vocab_size)
+    model = get_model(args, ingr_vocab_size, tool_vocab_size, action_vocab_size, instrs_vocab_size)
     model_path = os.path.join(args.save_dir, args.project_name, args.model_name, 'checkpoints', 'modelbest.ckpt')
 
     # overwrite flags for inference
@@ -103,14 +106,14 @@ def main(args):
 
     model.eval()
     model = model.to(device)
-    results_dict = {'recipes': {}, 'ingrs': {}, 'ingr_iou': {}}
+    results_dict = {'recipes': {}, 'ingrs': {}, 'ingr_iou': {}, 'tools': {}, 'tool_iou': {}, 'actions': {}, 'action_iou'}
     captions = {}
     iou = []
     error_types = {'tp_i': 0, 'fp_i': 0, 'fn_i': 0, 'tn_i': 0, 'tp_all': 0, 'fp_all': 0, 'fn_all': 0}
     perplexity_list = []
     n_rep, th = 0, 0.3
 
-    for i, (img_inputs, true_caps_batch, ingr_gt, imgid, impath) in tqdm(enumerate(data_loader)):
+    for i, (img_inputs, true_caps_batch, ingr_gt, tool_gt, action_gt, imgid, impath) in tqdm(enumerate(data_loader)):
 
         ingr_gt = ingr_gt.to(device)
         true_caps_batch = true_caps_batch.to(device)
@@ -139,13 +142,14 @@ def main(args):
                     outputs = model.sample(img_inputs, args.greedy, args.temperature, args.beam, true_ingrs)
 
                     if not args.recipe_only:
+                        # for ingredients
                         fake_ingrs = outputs['ingr_ids']
                         pred_one_hot = label2onehot(fake_ingrs, ingr_vocab_size - 1)
                         target_one_hot = label2onehot(ingr_gt, ingr_vocab_size - 1)
                         iou_item = torch.mean(softIoU(pred_one_hot, target_one_hot)).item()
                         iou.append(iou_item)
 
-                        update_error_types(error_types, pred_one_hot, target_one_hot)
+                        update_error_types(error_types, pred_one_hot, target_one_hot, 'ingr')
 
                         fake_ingrs = fake_ingrs.detach().cpu().numpy()
 
@@ -156,6 +160,45 @@ def main(args):
                             results_dict['ingrs'][imgid[ingr_idx]] = []
                             results_dict['ingrs'][imgid[ingr_idx]].append(fake_ingr)
                             results_dict['ingr_iou'][imgid[ingr_idx]] = iou_item
+                        
+                        # for tools
+                        fake_tools = outputs['tool_ids']
+                        pred_one_hot = label2onehot(fake_tools, tool_vocab_size - 1)
+                        target_one_hot = label2onehot(tool_gt, tool_vocab_size - 1)
+                        iou_item = torch.mean(softIoU(pred_one_hot, target_one_hot)).item()
+                        iou.append(iou_item)
+
+                        update_error_types(error_types, pred_one_hot, target_one_hot, 'tool')
+
+                        fake_tools = fake_tools.detach().cpu().numpy()
+
+                        for tool_idx, fake_tool in enumerate(fake_tools):
+
+                            iou_item = softIoU(pred_one_hot[tool_idx].unsqueeze(0),
+                                               target_one_hot[tool_idx].unsqueeze(0)).item()
+                            results_dict['tools'][imgid[tool_idx]] = []
+                            results_dict['tools'][imgid[tool_idx]].append(fake_tool)
+                            results_dict['tool_iou'][imgid[tool_idx]] = iou_item
+
+                        # for actions
+                        fake_actions = outputs['action_ids']
+                        pred_one_hot = label2onehot(fake_actions, action_vocab_size - 1)
+                        target_one_hot = label2onehot(action_gt, action_vocab_size - 1)
+                        iou_item = torch.mean(softIoU(pred_one_hot, target_one_hot)).item()
+                        iou.append(iou_item)
+
+                        update_error_types(error_types, pred_one_hot, target_one_hot, 'action')
+
+                        fake_actions = fake_actions.detach().cpu().numpy()
+
+                        for action_idx, fake_action in enumerate(fake_actions):
+
+                            iou_item = softIoU(pred_one_hot[action_idx].unsqueeze(0),
+                                               target_one_hot[action_idx].unsqueeze(0)).item()
+                            results_dict['actions'][imgid[action_idx]] = []
+                            results_dict['actions'][imgid[action_idx]].append(fake_action)
+                            results_dict['action_iou'][imgid[action_idx]] = iou_item
+                        
 
                     if not args.ingrs_only:
                         sampled_ids_batch = outputs['recipe_ids']
